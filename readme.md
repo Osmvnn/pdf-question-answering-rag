@@ -1,131 +1,127 @@
 # PDF Question Answering RAG
 
-A lightweight Retrieval-Augmented Generation (RAG) application that lets you upload a PDF, search for the most relevant passages, and answer questions based on the content of the document.
+A learning project that answers questions using passages retrieved from an uploaded PDF. It uses Python, Streamlit, sentence-transformer embeddings, FAISS, and a local Ollama model.
 
-This project uses a simple local pipeline:
-- Extract text from the uploaded PDF
-- Split the text into paragraph-based chunks
-- Convert chunks into embeddings with a sentence-transformer model
-- Store and search embeddings using FAISS
-- Return the most relevant chunk and show a concise answer in the app
+## Current status — 27 September 2026
 
-## Features
+The PDF-to-Ollama pipeline is connected. Filename and physical PDF page numbers are preserved, and the app displays retrieved passages alongside generated answers with citations such as `[S1]`.
 
-- Upload PDF files directly in the Streamlit UI
-- Extract text from PDF pages using `pypdf`
-- Chunk content with paragraph-based splitting and overlap
-- Semantic retrieval using FAISS vector search
-- Keyword-based ranking boost for better relevance
-- View source passages and similarity scores
-- Display a cleaned, short answer derived from the best matching chunk
+The current model is `llama3.2:3b`, with five retrieved passages. Answer reliability remains a work in progress: the model can produce unsupported claims even when its citation IDs are valid. Comparing a stronger model is deferred until the next session. A `llama3.1:8b` download was started and stopped before completion; it has not been evaluated or selected for the app. Ollama may retain partial download data outside this repository.
 
-## Tech Stack
+## How the pipeline works
 
-- Python
-- Streamlit
-- `pypdf` for PDF parsing
-- `sentence-transformers` for embeddings
-- FAISS for vector similarity search
-- NumPy for embedding processing
+1. **Load pages:** `extract_pages_from_pdf` returns text, filename, and a page number starting at 1. Blank pages do not renumber later pages.
+2. **Split text:** `split_pages_into_chunks` creates overlapping passages of up to 700 characters with 200-character overlap. Chunks stay within one page so their source is unambiguous.
+3. **Embed and index:** `all-MiniLM-L6-v2` embeds passage text. FAISS stores normalized vectors; the original chunk records retain metadata.
+4. **Retrieve:** the question is embedded, FAISS finds similar passages, and the existing keyword boost reranks them. Scores are ranking heuristics, not answer confidence. Search is capped at the number of available chunks.
+5. **Generate:** the top five passages receive IDs such as `S1` and are sent to `http://localhost:11434/api/chat`. The prompt requests at most two short sentences, evidence-only answers, citations, and acknowledgment of missing information. Temperature is 0.
+6. **Review:** Streamlit displays the answer and expandable passages with filename, page, and scores. Code rejects missing or unknown citation IDs, but cannot prove that a cited passage supports a claim.
 
-## Project Structure
+The prompt omits numeric bibliography markers such as `[2]` to reduce confusion with passage IDs. Original references remain in the stored and displayed passages. This convention fits the test guide; review it before using PDFs where bracketed numbers carry other meanings. The prompt also instructs the model not to infer authorship from a bibliography.
+
+The old text-only loading, splitting, and answer-cleaning helpers remain available for notebook experiments. The app uses the metadata-aware pipeline.
+
+## Project structure
 
 ```text
 pdf-question-answering-rag/
-├── app/
-│   └── app.py                # Streamlit application entry point
-├── src/
-│   ├── answer_generator.py   # Answer cleaning logic
-│   ├── pdf_loader.py         # PDF text extraction
-│   ├── text_splitter.py      # Chunking logic
-│   └── vector_store.py       # FAISS index creation and retrieval
-├── data/                     # Document storage folder
-├── notebooks/
-│   └── rag_experiment.ipynb # Experiments and prototyping
-├── readme.md                 # Project documentation
-├── requirements.txt          # Python dependencies
-└── .gitignore                # Git ignore rules (if present)
+|-- app/app.py                 # Streamlit interface
+|-- src/
+|   |-- answer_generator.py    # Ollama request and citation validation
+|   |-- pdf_loader.py          # PDF text and page metadata
+|   |-- text_splitter.py       # Overlapping chunks within pages
+|   `-- vector_store.py        # FAISS indexing, search, and ranking
+|-- data/                      # Local document storage
+|-- notebooks/                 # Experiments
+|-- tests/test_pipeline.py     # Offline regression checks
+|-- test_rag.py                # Live retrieval and answer evaluation
+|-- test_ollama.py             # Separate standalone connection test
+|-- requirements.txt
+`-- readme.md
 ```
 
-## Installation
+## Setup and run
 
-1. Open a terminal in the project root.
-2. Create a virtual environment:
+Run these commands in PowerShell from the project root. Skip creating the virtual environment if it already exists.
 
-```bash
+```powershell
 python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-3. Activate the environment:
+Start Ollama and make sure `llama3.2:3b` is installed. If necessary:
 
-On Windows:
-
-```bash
-.venv\Scripts\activate
+```powershell
+ollama pull llama3.2:3b
 ```
 
-On macOS/Linux:
+Then launch the app and upload a text-based PDF:
 
-```bash
-source .venv/bin/activate
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run app/app.py
 ```
 
-4. Install the required dependencies:
+The first embedding-model load may need internet access to download its files. Scanned PDFs need OCR, which is not implemented.
 
-```bash
-pip install -r requirements.txt
+The app uses `requests` to call Ollama; it does not need the `ollama` Python package. The separate `test_ollama.py` uses that package and requires it in whichever Python environment runs that test. Its supplied-context connection check remains separate from PDF retrieval tests.
+
+## Test step by step
+
+The test guide is a two-page PDF that produces eight chunks with the current settings.
+
+```powershell
+$pdf = 'C:\Users\N01SC\Documents\Codex\2026-09-23\rw\outputs\Dental_Caries_Guide.pdf'
+
+# 1. Check pipeline behavior without calling Ollama.
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
+
+# 2. Inspect retrieved passages before evaluating generated answers.
+.\.venv\Scripts\python.exe -B test_rag.py $pdf --offline --retrieval-only
+
+# 3. Generate answers to the six default questions.
+.\.venv\Scripts\python.exe -B test_rag.py $pdf --offline
+
+# 4. Compare three and five passages, saving each completed result.
+.\.venv\Scripts\python.exe -B test_rag.py $pdf --offline --top-k 3 5 --output comparison.jsonl
 ```
 
-## Run the Application
+`--offline` uses the cached embedding model; omit it if that model has not yet been downloaded. Use `--question "Your question"` to override the default questions; repeat the flag for multiple questions. Use a new output filename for each evaluation. Saved results include passages, answers or errors, generation time, and rejected raw answers when citation validation fails.
 
-Start the Streamlit app:
+A successful script exit does not establish answer accuracy. Review every factual claim against its cited passage. For missing information, the expected response is:
 
-```bash
-streamlit run app/app.py
-```
+> The supplied PDF passages do not provide this information.
 
-Then open the local URL shown in the terminal, usually:
+This describes the retrieved evidence, not a guarantee that all information in the entire PDF was examined.
 
-```text
-http://localhost:8501
-```
+## Latest evaluation results
 
-## How the App Works
+Manual review of one run per setting, using the same six questions and the final cleaned-context prompt with `llama3.2:3b`:
 
-1. The user uploads a PDF.
-2. The app extracts the text from every page.
-3. The text is split into smaller paragraph-based chunks.
-4. Each chunk is converted into embeddings using the `all-MiniLM-L6-v2` model.
-5. The vectors are stored in a FAISS index.
-6. When a question is asked, the app embeds the question and retrieves the most relevant chunks.
-7. The top matching chunk is cleaned and displayed as the answer.
-8. The app also shows the source chunks and retrieval scores.
+| Question | Three passages | Five passages |
+| --- | --- | --- |
+| How does dental caries develop? | Supported answer and citation | Supported answer and citation |
+| How often should I brush my teeth, and what toothpaste should I use? | Supported answer and citation | Supported answer and citation |
+| Can brushing regrow tooth structure already lost to a cavity? | Correct answer, wrong supporting passage cited | Supported answer and citation |
+| What is the exact price of a filling in Dubai? | Correctly acknowledged missing information | Correctly acknowledged missing information |
+| Who wrote this guide? | Invented an author from cited sources | Invented an author from cited sources |
+| How often should I brush, and what is the exact price of a filling in Dubai? | Correct brushing advice and missing-price acknowledgment; unnecessary citation on the missing-information statement | Supported brushing advice and missing-price acknowledgment |
 
-## Notes
+Five passages met the answer-and-support criteria on **5 of 6 questions**, compared with **4 of 6** for three passages. The app therefore retains five passages. These are small development-set results, not a general accuracy estimate; the prompt was adjusted using these questions.
 
-- This is a lightweight prototype and not a production-grade LLM application.
-- It works best with PDF files that contain readable text.
-- The answer is generated from retrieved document chunks rather than from a separate LLM model.
-- The project is suitable for learning and experimenting with basic RAG pipelines.
+Earlier runs copied the PDF's bibliography numbers as answer citations. Removing those markers from the model context improved citation formatting. It did not eliminate hallucination: the guide cites NIDCR/NHS material but does not name an author, and the model still attributed authorship to a cited institution.
 
-## Example Workflow
+All five offline regression tests passed. They cover chunk bounds and metadata, blank PDFs, fewer chunks than requested results, citation validation and connection errors, and empty evidence. Streamlit startup was also checked successfully during integration. Temporary evaluation outputs were removed after recording this summary.
 
-1. Upload a PDF containing company policies, course material, or technical documentation.
-2. Ask a question such as: "What are the main benefits mentioned in the document?"
-3. Review the retrieved source passages and the generated answer.
+## Next session: compare a stronger model
 
-## Required Dependencies
+1. Choose and finish installing a stronger local model. `llama3.1:8b` was the proposed comparison candidate, not a verified improvement. The computer has about 16 GB of RAM and integrated Intel graphics, so measure response time as well as answer quality.
+2. Hold the PDF, questions, prompt, and five-passage retrieval setting fixed. Change only the model with `--model`:
 
-The project depends on:
-- `streamlit`
-- `sentence-transformers`
-- `faiss-cpu`
-- `pypdf`
-- `numpy`
-- `torch`
+   ```powershell
+   .\.venv\Scripts\python.exe -B test_rag.py $pdf --offline --top-k 5 --model llama3.1:8b --output comparison_8b.jsonl
+   ```
 
-For the complete list, see [requirements.txt](requirements.txt).
+3. Check every citation and require abstention on the author and price questions. Compare the results before changing the app's default model.
+4. Add new questions and another PDF that were not used to tune the prompt, including partially answerable questions.
 
-## License
-
-This project is provided for educational and experimental use.
+When diagnosing a failure, inspect retrieval first. If the necessary passage is absent, improve retrieval or chunking. If it is present but the answer misuses it, investigate generation. A valid citation label alone is never proof of a supported answer.
